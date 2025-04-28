@@ -277,7 +277,12 @@ projection_ewa_3dgs_packed_fwd(
     const float far_plane,
     const float radius_clip,
     const bool calc_compensations,
-    const CameraModelType camera_model
+    const CameraModelType camera_model,
+    // Added inputs
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
+    const float exposure_time,
 ) {
     DEVICE_GUARD(means);
     CHECK_INPUT(means);
@@ -322,6 +327,10 @@ projection_ewa_3dgs_packed_fwd(
             radius_clip,
             c10::nullopt, // block_accum
             camera_model,
+            lin_vel,
+            ang_vel,
+            rolling_shutter_time,
+            exposure_time,
             // outputs
             block_cnts,
             c10::nullopt, // indptr
@@ -333,7 +342,8 @@ projection_ewa_3dgs_packed_fwd(
             c10::nullopt, // conics
             // pass in as an indicator on whether compensation will be applied or not.
             calc_compensations ? at::optional<at::Tensor>(at::empty({1}, opt))
-                               : c10::nullopt
+                               : c10::nullopt,
+            c10::nullopt, // pix_vels
         );
         block_accum = at::cumsum(block_cnts, 0, at::kInt);
         nnz = block_accum[-1].item<int32_t>();
@@ -350,6 +360,7 @@ projection_ewa_3dgs_packed_fwd(
     at::Tensor depths = at::empty({nnz}, opt);
     at::Tensor conics = at::empty({nnz, 3}, opt);
     at::Tensor compensations;
+    at::Tensor pix_vels = at::empty({nnz, 2}, opt);
     if (calc_compensations) {
         // we dont want NaN to appear in this tensor, so we zero intialize it
         compensations = at::zeros({nnz}, opt);
@@ -373,6 +384,10 @@ projection_ewa_3dgs_packed_fwd(
             radius_clip,
             block_accum,
             camera_model,
+            lin_vel,
+            ang_vel,
+            rolling_shutter_time,
+            exposure_time,
             // outputs
             c10::nullopt, // block_cnts
             indptr,
@@ -383,7 +398,9 @@ projection_ewa_3dgs_packed_fwd(
             depths,
             conics,
             calc_compensations ? at::optional<at::Tensor>(compensations)
-                               : c10::nullopt
+                               : c10::nullopt,
+            pix_vels,
+                               
         );
     } else {
         indptr.fill_(0);
@@ -397,7 +414,8 @@ projection_ewa_3dgs_packed_fwd(
         means2d,
         depths,
         conics,
-        compensations
+        compensations,
+        pix_vels,
     );
 }
 
@@ -414,16 +432,22 @@ projection_ewa_3dgs_packed_bwd(
     const uint32_t image_height,
     const float eps2d,
     const CameraModelType camera_model,
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
+    const float exposure_time,
     // fwd outputs
     const at::Tensor camera_ids,                  // [nnz]
     const at::Tensor gaussian_ids,                // [nnz]
     const at::Tensor conics,                      // [nnz, 3]
     const at::optional<at::Tensor> compensations, // [nnz] optional
+    const at::Tensor pix_vels,                    // [nnz, 2]
     // grad outputs
     const at::Tensor v_means2d,                     // [nnz, 2]
     const at::Tensor v_depths,                      // [nnz]
     const at::Tensor v_conics,                      // [nnz, 3]
     const at::optional<at::Tensor> v_compensations, // [nnz] optional
+    const at::Tensor v_pix_vels, // [nnz, 2]
     const bool viewmats_requires_grad,
     const bool sparse_grad
 ) {
@@ -493,16 +517,22 @@ projection_ewa_3dgs_packed_bwd(
         image_height,
         eps2d,
         camera_model,
+        lin_vel,
+        ang_vel,
+        rolling_shutter_time,
+        exposure_time,
         // fwd outputs
         camera_ids,
         gaussian_ids,
         conics,
         compensations,
+        pix_vels,
         // grad outputs
         v_means2d,
         v_depths,
         v_conics,
         v_compensations,
+        v_pix_vels,
         sparse_grad,
         // outputs
         v_means,

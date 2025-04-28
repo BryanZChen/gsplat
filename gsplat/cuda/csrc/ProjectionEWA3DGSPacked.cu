@@ -9,6 +9,8 @@
 #include "Projection.h"
 #include "Utils.cuh"
 
+#include "helpers.cuh"
+
 namespace gsplat {
 
 namespace cg = cooperative_groups;
@@ -33,6 +35,12 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
     const int32_t
         *__restrict__ block_accum, // [C * blocks_per_row] packing helper
     const CameraModelType camera_model,
+    // Added inputs
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
+    const float exposure_time,
+
     // outputs
     int32_t *__restrict__ block_cnts,    // [C * blocks_per_row] packing helper
     int32_t *__restrict__ indptr,        // [C + 1]
@@ -42,7 +50,8 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
     scalar_t *__restrict__ means2d,      // [nnz, 2]
     scalar_t *__restrict__ depths,       // [nnz]
     scalar_t *__restrict__ conics,       // [nnz, 3]
-    scalar_t *__restrict__ compensations // [nnz] optional
+    scalar_t *__restrict__ compensations, // [nnz] optional
+    scalar_t *__restrict__ pix_vels,    // [nnz, 2]
 ) {
     int32_t blocks_per_row = gridDim.x;
 
@@ -250,6 +259,24 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
             if (compensations != nullptr) {
                 compensations[thread_data] = compensation;
             }
+            if (pix_vels != nullptr) {
+                float fx = Ks[0];
+                float fy = Ks[4];
+                float2 focal_lengths = make_float2(fx, fy);
+    
+                float2 pix_vel = make_float2(0.f, 0.f);
+                if (rolling_shutter_time > 0.f || exposure_time > 0.f) {
+                    pix_vel = compute_pix_velocity(mean_c, lin_vel, ang_vel, focal_lengths);
+    
+                    // (Optional) expand radius to account for motion blur
+                    float extra_radius = sqrtf(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5f * (exposure_time + rolling_shutter_time);
+                    radii[thread_data * 2]     += (int32_t)ceilf(extra_radius);
+                    radii[thread_data * 2 + 1] += (int32_t)ceilf(extra_radius);
+                }
+                pix_vels[thread_data * 2] = pix_vel.x;
+                pix_vels[thread_data * 2 + 1] = pix_vel.y;
+            }
+            
         }
         // lane 0 of the first block in each row writes the indptr
         if (threadIdx.x == 0 && block_col_idx == 0) {
@@ -281,6 +308,12 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
     const at::optional<at::Tensor>
         block_accum, // [C * blocks_per_row] packing helper
     const CameraModelType camera_model,
+    // Added inputs
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
+    const float exposure_time,
+
     // outputs
     at::optional<at::Tensor> block_cnts, // [C * blocks_per_row] packing helper
     at::optional<at::Tensor> indptr,     // [C + 1]
@@ -290,7 +323,8 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
     at::optional<at::Tensor> means2d,      // [nnz, 2]
     at::optional<at::Tensor> depths,       // [nnz]
     at::optional<at::Tensor> conics,       // [nnz, 3]
-    at::optional<at::Tensor> compensations // [nnz] optional
+    at::optional<at::Tensor> compensations, // [nnz] optional
+    at::optional<at::Tensor> pix_vels, // [nnz, 2]
 ) {
     uint32_t N = means.size(0);    // number of gaussians
     uint32_t C = viewmats.size(0); // number of cameras
@@ -308,6 +342,11 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
         // skip the kernel launch if there are no elements
         return;
     }
+
+    // auto lin_arr = linear_velocity.cpu().data_ptr<float>();
+    // auto ang_arr = angular_velocity.cpu().data_ptr<float>();
+    // float3 lin = make_float3(lin_arr[0], lin_arr[1], lin_arr[2]);
+    // float3 ang = make_float3(ang_arr[0], ang_arr[1], ang_arr[2]);
 
     AT_DISPATCH_FLOATING_TYPES(
         means.scalar_type(),
@@ -341,6 +380,11 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
                         ? block_accum.value().data_ptr<int32_t>()
                         : nullptr,
                     camera_model,
+                    lin_vel,
+                    ang_vel,
+                    rolling_shutter_time,
+                    exposure_time,
+                    // outputs
                     block_cnts.has_value()
                         ? block_cnts.value().data_ptr<int32_t>()
                         : nullptr,
@@ -362,7 +406,9 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
                                        : nullptr,
                     compensations.has_value()
                         ? compensations.value().data_ptr<scalar_t>()
-                        : nullptr
+                        : nullptr,
+                    pix_vels.has_value() ? pix_vels.value().data_ptr<scalar_t>()
+                                         : nullptr,
                 );
         }
     );
@@ -384,16 +430,23 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
     const int32_t image_height,
     const scalar_t eps2d,
     const CameraModelType camera_model,
+
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
+    const float exposure_time,
     // fwd outputs
     const int64_t *__restrict__ camera_ids,     // [nnz]
     const int64_t *__restrict__ gaussian_ids,   // [nnz]
     const scalar_t *__restrict__ conics,        // [nnz, 3]
     const scalar_t *__restrict__ compensations, // [nnz] optional
+    const scalar_t *__restrict__ pix_vels,    // [nnz, 2]
     // grad outputs
     const scalar_t *__restrict__ v_means2d,       // [nnz, 2]
     const scalar_t *__restrict__ v_depths,        // [nnz]
     const scalar_t *__restrict__ v_conics,        // [nnz, 3]
     const scalar_t *__restrict__ v_compensations, // [nnz] optional
+    const scalar_t *__restrict__ v_pix_vels,      // [nnz, 2]
     const bool sparse_grad, // whether the outputs are in COO format [nnz, ...]
     // grad inputs
     scalar_t *__restrict__ v_means,   // [N, 3] or [nnz, 3]
@@ -420,6 +473,9 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
     v_means2d += idx * 2;
     v_depths += idx;
     v_conics += idx * 3;
+
+    pix_vels   += idx * 2;    // shift the *forward* pix_vels pointer
+    v_pix_vels += idx * 2;    // shift the *grad* pix_vels pointer
 
     // vjp: compute the inverse of the 2d covariance
     mat2 covar2d_inv = mat2(conics[0], conics[1], conics[1], conics[2]);
@@ -478,6 +534,26 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
     mat3 covar_c;
     covarW2C(R, covar, covar_c);
 
+    // // Add pixel velocity VJP if motion blur
+    // if (rolling_shutter_time > 0.f || exposure_time > 0.f) {
+    //     float2 focal_lengths = make_float2(Ks[0], Ks[4]);
+    //     const float2 pix_vel = make_float2(pix_vels[idx * 2], pix_vels[idx * 2 + 1]);
+    //     float3 v_p_view_pix_vel = make_float3(0.f, 0.f, 0.f);
+        
+    //     compute_and_sum_pix_velocity_vjp(
+    //         mean_c,  // p_view
+    //         lin_vel,
+    //         ang_vel,
+    //         focal_lengths,
+    //         pix_vel,
+    //         v_p_view_pix_vel
+    //     );
+        
+    //     v_mean_c.x += v_p_view_pix_vel.x;
+    //     v_mean_c.y += v_p_view_pix_vel.y;
+    //     v_mean_c.z += v_p_view_pix_vel.z;
+    // }
+
     float fx = Ks[0], cx = Ks[2], fy = Ks[4], cy = Ks[5];
     mat3 v_covar_c(0.f);
     vec3 v_mean_c(0.f);
@@ -534,6 +610,29 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
 
     // add contribution from v_depths
     v_mean_c.z += v_depths[0];
+
+    // pix_vels   += idx * 2;
+    // v_pix_vels += idx * 2;
+
+    // --- motion‐blur pixel‐velocity VJP ---
+    // reconstruct focal‐lengths from Ks
+    float2 focal_lengths = make_float2(fx, fy);
+
+    // read the upstream gradient of the 2‐vector pix_vel
+    float2 v_pix = make_float2(v_pix_vels[0], v_pix_vels[1]);
+
+    // accumulate into the camera‐space mean gradient
+    // compute_and_sum_pix_velocity_vjp(
+    //    p_view, lin_vel, ang_vel, focal, v_pix, &v_mean_c)
+    compute_and_sum_pix_velocity_vjp(
+        mean_c,
+        lin_vel,
+        ang_vel,
+        focal_lengths,
+        v_pix,
+        v_mean_c     // this vector already holds dL/d(mean_c)
+    );
+    // now v_mean_c.x/y/z have the extra contributions from d_pix_vel
 
     // vjp: transform Gaussian covariance to camera space
     vec3 v_mean(0.f);
@@ -659,16 +758,22 @@ void launch_projection_ewa_3dgs_packed_bwd_kernel(
     const uint32_t image_height,
     const float eps2d,
     const CameraModelType camera_model,
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
+    const float exposure_time,
     // fwd outputs
     const at::Tensor camera_ids,                  // [nnz]
     const at::Tensor gaussian_ids,                // [nnz]
     const at::Tensor conics,                      // [nnz, 3]
     const at::optional<at::Tensor> compensations, // [nnz] optional
+    const at::Tensor pix_vels,                    // [nnz, 2]
     // grad outputs
     const at::Tensor v_means2d,                     // [nnz, 2]
     const at::Tensor v_depths,                      // [nnz]
     const at::Tensor v_conics,                      // [nnz, 3]
     const at::optional<at::Tensor> v_compensations, // [nnz] optional
+    const at::Tensor v_pix_vels, // [nnz, 2]
     const bool sparse_grad,
     // grad inputs
     at::Tensor v_means,                 // [N, 3] or [nnz, 3]
@@ -690,6 +795,12 @@ void launch_projection_ewa_3dgs_packed_bwd_kernel(
         return;
     }
 
+    // build float3
+    // auto lin_arr = linear_velocity.cpu().data_ptr<float>();
+    // auto ang_arr = angular_velocity.cpu().data_ptr<float>();
+    // float3 lin = make_float3(lin_arr[0], lin_arr[1], lin_arr[2]);
+    // float3 ang = make_float3(ang_arr[0], ang_arr[1], ang_arr[2]);
+
     AT_DISPATCH_FLOATING_TYPES(
         means.scalar_type(),
         "projection_ewa_3dgs_packed_bwd_kernel",
@@ -709,24 +820,36 @@ void launch_projection_ewa_3dgs_packed_bwd_kernel(
                                        : quats.value().data_ptr<scalar_t>(),
                     covars.has_value() ? nullptr
                                        : scales.value().data_ptr<scalar_t>(),
+                    //  quats.has_value() 
+                    //     ? quats.value().data_ptr<scalar_t>() 
+                    //     : nullptr,
+                    //   scales.has_value() 
+                    //     ? scales.value().data_ptr<scalar_t>() 
+                    //     : nullptr,
                     viewmats.data_ptr<scalar_t>(),
                     Ks.data_ptr<scalar_t>(),
                     image_width,
                     image_height,
                     eps2d,
                     camera_model,
+                    lin,
+                    ang,
+                    rolling_shutter_time,
+                    exposure_time,
                     camera_ids.data_ptr<int64_t>(),
                     gaussian_ids.data_ptr<int64_t>(),
                     conics.data_ptr<scalar_t>(),
                     compensations.has_value()
                         ? compensations.value().data_ptr<scalar_t>()
                         : nullptr,
+                    pix_vels.data_ptr<scalar_t>(),
                     v_means2d.data_ptr<scalar_t>(),
                     v_depths.data_ptr<scalar_t>(),
                     v_conics.data_ptr<scalar_t>(),
                     v_compensations.has_value()
                         ? v_compensations.value().data_ptr<scalar_t>()
                         : nullptr,
+                    v_pix_vels.data_ptr<scalar_t>(),
                     sparse_grad,
                     v_means.data_ptr<scalar_t>(),
                     covars.has_value() ? v_covars.value().data_ptr<scalar_t>()

@@ -246,7 +246,6 @@ def _world_to_cam(
     covars_c = torch.einsum("cij,njk,clk->cnil", R, covars, R)  # [C, N, 3, 3]
     return means_c, covars_c
 
-
 def _fully_fused_projection(
     means: Tensor,  # [N, 3]
     covars: Tensor,  # [N, 3, 3]

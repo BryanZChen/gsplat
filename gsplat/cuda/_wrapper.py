@@ -4,7 +4,8 @@ from typing import Any, Callable, Optional, Tuple
 import torch
 from torch import Tensor
 from typing_extensions import Literal
-
+from jaxtyping import Float
+import numpy
 
 def _make_lazy_cuda_func(name: str) -> Callable:
     def call_cuda(*args, **kwargs):
@@ -224,6 +225,10 @@ def fully_fused_projection(
     calc_compensations: bool = False,
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
     opacities: Optional[Tensor] = None,  # [N] or None
+    linear_velocity: Optional[Float[Tensor, "3"]] = None,
+    angular_velocity: Optional[Float[Tensor, "3"]]  = None,
+    rolling_shutter_time: float = 0.0,
+    exposure_time: float = 0.0,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Projects Gaussians to 2D.
 
@@ -332,6 +337,10 @@ def fully_fused_projection(
             calc_compensations,
             camera_model,
             opacities,
+            linear_velocity,
+            angular_velocity,
+            rolling_shutter_time,
+            exposure_time,
         )
     else:
         return _FullyFusedProjection.apply(
@@ -1028,7 +1037,19 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         calc_compensations: bool,
         camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
         opacities: Optional[Tensor] = None,  # [N] or None
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        linear_velocity: Float[Tensor, "3"] = None,
+        angular_velocity: Float[Tensor, "3"] = None,
+        rolling_shutter_time: float = 0.0,
+        exposure_time: float = 0.0,
+    ) -> Tuple[    Tensor,  # camera_ids
+                    Tensor,  # gaussian_ids
+                    Tensor,  # radii
+                    Tensor,  # means2d
+                    Tensor,  # depths
+                    Tensor,  # conics
+                    Optional[Tensor],  # compensations
+                    Tensor   # pix_vels
+                    ]:
         camera_model_type = _make_lazy_cuda_obj(
             f"CameraModelType.{camera_model.upper()}"
         )
@@ -1042,6 +1063,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             depths,
             conics,
             compensations,
+            pix_vels,
         ) = _make_lazy_cuda_func("projection_ewa_3dgs_packed_fwd")(
             means,
             covars,  # optional
@@ -1058,6 +1080,10 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             radius_clip,
             calc_compensations,
             camera_model_type,
+            tuple(numpy.ravel(linear_velocity.detach().tolist())),   # 3 floats
+            tuple(numpy.ravel(angular_velocity.detach().tolist())),  # 3 floats
+            rolling_shutter_time,
+            exposure_time,
         )
         if not calc_compensations:
             compensations = None
@@ -1072,14 +1098,19 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             Ks,
             conics,
             compensations,
+            linear_velocity,
+            angular_velocity,
+            pix_vels,
         )
         ctx.width = width
         ctx.height = height
         ctx.eps2d = eps2d
         ctx.sparse_grad = sparse_grad
         ctx.camera_model_type = camera_model_type
+        ctx.rolling_shutter_time = rolling_shutter_time
+        ctx.exposure_time = exposure_time
 
-        return camera_ids, gaussian_ids, radii, means2d, depths, conics, compensations
+        return camera_ids, gaussian_ids, radii, means2d, depths, conics, compensations, pix_vels
 
     @staticmethod
     def backward(
@@ -1091,6 +1122,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         v_depths,
         v_conics,
         v_compensations,
+        v_pix_vels,
     ):
         (
             camera_ids,
@@ -1103,12 +1135,17 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             Ks,
             conics,
             compensations,
+            linear_velocity,
+            angular_velocity,
+            pix_vels,
         ) = ctx.saved_tensors
         width = ctx.width
         height = ctx.height
         eps2d = ctx.eps2d
         sparse_grad = ctx.sparse_grad
         camera_model_type = ctx.camera_model_type
+        rolling_shutter_time = ctx.rolling_shutter_time
+        exposure_time = ctx.exposure_time
 
         if v_compensations is not None:
             v_compensations = v_compensations.contiguous()
@@ -1125,14 +1162,20 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             height,
             eps2d,
             camera_model_type,
+            tuple(numpy.ravel(linear_velocity.detach().tolist())),   # 3 floats
+            tuple(numpy.ravel(angular_velocity.detach().tolist())),  # 3 floats
+            rolling_shutter_time,
+            exposure_time,
             camera_ids,
             gaussian_ids,
             conics,
             compensations,
+            pix_vels,
             v_means2d.contiguous(),
             v_depths.contiguous(),
             v_conics.contiguous(),
             v_compensations,
+            v_pix_vels.contiguous(),
             ctx.needs_input_grad[4],  # viewmats_requires_grad
             sparse_grad,
         )
@@ -1184,23 +1227,23 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         if not ctx.needs_input_grad[4]:
             v_viewmats = None
 
+        v_lin_vel = None
+        v_ang_vel = None
+
         return (
-            v_means,
-            v_covars,
-            v_quats,
-            v_scales,
-            v_viewmats,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+        v_means,           # for means
+        v_covars,          # for covars
+        v_quats,           # for quats
+        v_scales,          # for scales
+        v_viewmats,        # for viewmats
+        None,              # for Ks
+        None, None, None,  # for width, height, eps2d
+        None, None, None,  # for near_plane, far_plane, radius_clip
+        None, None, None,  # for sparse_grad, calc_compensations, camera_model
+        None,              # for opacities
+        v_lin_vel,         # for linear_velocity
+        v_ang_vel,         # for angular_velocity
+        None, None         # for rolling_shutter_time, exposure_time
         )
 
 

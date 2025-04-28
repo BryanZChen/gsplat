@@ -1,5 +1,6 @@
 import math
 from typing import Dict, Optional, Tuple
+from jaxtyping import Float
 
 import torch
 import torch.distributed
@@ -51,6 +52,10 @@ def rasterization(
     distributed: bool = False,
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
     covars: Optional[Tensor] = None,
+    linear_velocity: Optional[Float[Tensor, "3"]] = None,
+    angular_velocity: Optional[Float[Tensor, "3"]] = None,
+    rolling_shutter_time: float = 0.0,
+    exposure_time: float = 0.0,
 ) -> Tuple[Tensor, Tensor, Dict]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -315,7 +320,13 @@ def rasterization(
         calc_compensations=(rasterize_mode == "antialiased"),
         camera_model=camera_model,
         opacities=opacities,  # use opacities to compute a tigher bound for radii.
+        linear_velocity=linear_velocity,
+        angular_velocity=angular_velocity,
+        rolling_shutter_time=rolling_shutter_time,
+        exposure_time=exposure_time,
     )
+    
+    pix_vels = None
 
     if packed:
         # The results are packed into shape [nnz, ...]. All elements are valid.
@@ -327,6 +338,7 @@ def rasterization(
             depths,
             conics,
             compensations,
+            pix_vels,
         ) = proj_results
         opacities = opacities[gaussian_ids]  # [nnz]
     else:
@@ -583,7 +595,7 @@ def rasterization(
             dim=-1,
         )
 
-    return render_colors, render_alphas, meta
+    return render_colors, render_alphas, meta, pix_vels
 
 
 def _rasterization(
