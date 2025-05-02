@@ -319,47 +319,50 @@ def fully_fused_projection(
 
     viewmats = viewmats.contiguous()
     Ks = Ks.contiguous()
-    if packed:
-        return _FullyFusedProjectionPacked.apply(
-            means,
-            covars,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            eps2d,
-            near_plane,
-            far_plane,
-            radius_clip,
-            sparse_grad,
-            calc_compensations,
-            camera_model,
-            opacities,
-            linear_velocity,
-            angular_velocity,
-            rolling_shutter_time,
-            exposure_time,
-        )
-    else:
-        return _FullyFusedProjection.apply(
-            means,
-            covars,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            eps2d,
-            near_plane,
-            far_plane,
-            radius_clip,
-            calc_compensations,
-            camera_model,
-            opacities,
-        )
+    # if packed:
+
+    return _FullyFusedProjectionPacked.apply(
+        means,
+        covars,
+        quats,
+        scales,
+        viewmats,
+        Ks,
+        width,
+        height,
+        eps2d,
+        near_plane,
+        far_plane,
+        radius_clip,
+        sparse_grad,
+        calc_compensations,
+        camera_model,
+        opacities,
+        # linear_velocity,
+        # angular_velocity,
+        linear_velocity.contiguous(),
+        angular_velocity.contiguous(),
+        rolling_shutter_time,
+        exposure_time,
+    )
+    # else:
+    #     return _FullyFusedProjection.apply(
+    #         means,
+    #         covars,
+    #         quats,
+    #         scales,
+    #         viewmats,
+    #         Ks,
+    #         width,
+    #         height,
+    #         eps2d,
+    #         near_plane,
+    #         far_plane,
+    #         radius_clip,
+    #         calc_compensations,
+    #         camera_model,
+    #         opacities,
+    #     )
 
 
 @torch.no_grad()
@@ -1037,8 +1040,8 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         calc_compensations: bool,
         camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
         opacities: Optional[Tensor] = None,  # [N] or None
-        linear_velocity: Float[Tensor, "3"] = None,
-        angular_velocity: Float[Tensor, "3"] = None,
+        linear_velocity: Float[Tensor, "3"] = torch.zeros(3),
+        angular_velocity: Float[Tensor, "3"] = torch.zeros(3),
         rolling_shutter_time: float = 0.0,
         exposure_time: float = 0.0,
     ) -> Tuple[    Tensor,  # camera_ids
@@ -1080,8 +1083,14 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             radius_clip,
             calc_compensations,
             camera_model_type,
-            tuple(numpy.ravel(linear_velocity.detach().tolist())),   # 3 floats
-            tuple(numpy.ravel(angular_velocity.detach().tolist())),  # 3 floats
+            # tuple(linear_velocity.detach().tolist()),   # 3 floats
+            # tuple(angular_velocity.detach().tolist()),  # 3 floats
+            linear_velocity[0].item(),
+            linear_velocity[1].item(),
+            linear_velocity[2].item(),
+            angular_velocity[0].item(),
+            angular_velocity[1].item(),
+            angular_velocity[2].item(),
             rolling_shutter_time,
             exposure_time,
         )
@@ -1162,8 +1171,14 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             height,
             eps2d,
             camera_model_type,
-            tuple(numpy.ravel(linear_velocity.detach().tolist())),   # 3 floats
-            tuple(numpy.ravel(angular_velocity.detach().tolist())),  # 3 floats
+            # tuple(numpy.ravel(linear_velocity.detach().tolist())),   # 3 floats
+            # tuple(numpy.ravel(angular_velocity.detach().tolist())),  # 3 floats
+            linear_velocity[0].item(),
+            linear_velocity[1].item(),
+            linear_velocity[2].item(),
+            angular_velocity[0].item(),
+            angular_velocity[1].item(),
+            angular_velocity[2].item(),
             rolling_shutter_time,
             exposure_time,
             camera_ids,

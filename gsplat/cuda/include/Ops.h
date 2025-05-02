@@ -102,6 +102,7 @@ std::tuple<
     at::Tensor,
     at::Tensor,
     at::Tensor,
+    at::Tensor,
     at::Tensor>
 projection_ewa_3dgs_packed_fwd(
     const at::Tensor means,                   // [N, 3]
@@ -118,7 +119,17 @@ projection_ewa_3dgs_packed_fwd(
     const float far_plane,
     const float radius_clip,
     const bool calc_compensations,
-    const CameraModelType camera_model
+    const CameraModelType camera_model,
+    // Added
+    const float lin_vel_x,
+    const float lin_vel_y,
+    const float lin_vel_z,
+    const float ang_vel_x,
+    const float ang_vel_y,
+    const float ang_vel_z,
+
+    const float rolling_shutter_time,
+    const float exposure_time
 );
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 projection_ewa_3dgs_packed_bwd(
@@ -133,16 +144,28 @@ projection_ewa_3dgs_packed_bwd(
     const uint32_t image_height,
     const float eps2d,
     const CameraModelType camera_model,
+    // Added
+    const float lin_vel_x,
+    const float lin_vel_y,
+    const float lin_vel_z,
+    const float ang_vel_x,
+    const float ang_vel_y,
+    const float ang_vel_z,
+
+    const float rolling_shutter_time,
+    const float exposure_time,
     // fwd outputs
     const at::Tensor camera_ids,                  // [nnz]
     const at::Tensor gaussian_ids,                // [nnz]
     const at::Tensor conics,                      // [nnz, 3]
     const at::optional<at::Tensor> compensations, // [nnz] optional
+    const at::Tensor pix_vels,                    // [nnz, 2]
     // grad outputs
     const at::Tensor v_means2d,                     // [nnz, 2]
     const at::Tensor v_depths,                      // [nnz]
     const at::Tensor v_conics,                      // [nnz, 3]
     const at::optional<at::Tensor> v_compensations, // [nnz] optional
+    const at::Tensor v_pix_vels, // [nnz, 2]
     const bool viewmats_requires_grad,
     const bool sparse_grad
 );

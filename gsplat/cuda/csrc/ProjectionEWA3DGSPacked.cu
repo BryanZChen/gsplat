@@ -1,5 +1,6 @@
 #include <ATen/Dispatch.h>
 #include <ATen/core/Tensor.h>
+#include <cuda_runtime.h> // Added
 #include <ATen/cuda/Atomic.cuh>
 #include <c10/cuda/CUDAStream.h>
 #include <cooperative_groups.h>
@@ -51,7 +52,7 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
     scalar_t *__restrict__ depths,       // [nnz]
     scalar_t *__restrict__ conics,       // [nnz, 3]
     scalar_t *__restrict__ compensations, // [nnz] optional
-    scalar_t *__restrict__ pix_vels,    // [nnz, 2]
+    scalar_t *__restrict__ pix_vels    // [nnz, 2]
 ) {
     int32_t blocks_per_row = gridDim.x;
 
@@ -263,10 +264,12 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
                 float fx = Ks[0];
                 float fy = Ks[4];
                 float2 focal_lengths = make_float2(fx, fy);
-    
+
+                float3 p_view = make_float3(mean_c.x, mean_c.y, mean_c.z);
                 float2 pix_vel = make_float2(0.f, 0.f);
                 if (rolling_shutter_time > 0.f || exposure_time > 0.f) {
-                    pix_vel = compute_pix_velocity(mean_c, lin_vel, ang_vel, focal_lengths);
+                    // pix_vel = compute_pix_velocity(mean_c, lin_vel, ang_vel, focal_lengths);
+                    pix_vel = compute_pix_velocity(p_view, lin_vel, ang_vel, focal_lengths);
     
                     // (Optional) expand radius to account for motion blur
                     float extra_radius = sqrtf(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5f * (exposure_time + rolling_shutter_time);
@@ -324,7 +327,7 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
     at::optional<at::Tensor> depths,       // [nnz]
     at::optional<at::Tensor> conics,       // [nnz, 3]
     at::optional<at::Tensor> compensations, // [nnz] optional
-    at::optional<at::Tensor> pix_vels, // [nnz, 2]
+    at::optional<at::Tensor> pix_vels // [nnz, 2]
 ) {
     uint32_t N = means.size(0);    // number of gaussians
     uint32_t C = viewmats.size(0); // number of cameras
@@ -408,7 +411,7 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
                         ? compensations.value().data_ptr<scalar_t>()
                         : nullptr,
                     pix_vels.has_value() ? pix_vels.value().data_ptr<scalar_t>()
-                                         : nullptr,
+                                         : nullptr
                 );
         }
     );
@@ -557,6 +560,10 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
     float fx = Ks[0], cx = Ks[2], fy = Ks[4], cy = Ks[5];
     mat3 v_covar_c(0.f);
     vec3 v_mean_c(0.f);
+
+    // Added
+    float3 v_mean_c_fb = make_float3(0.f, 0.f, 0.f);
+
     switch (camera_model) {
     case CameraModelType::PINHOLE: // perspective projection
         persp_proj_vjp(
@@ -614,7 +621,7 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
     // pix_vels   += idx * 2;
     // v_pix_vels += idx * 2;
 
-    // --- motion‐blur pixel‐velocity VJP ---
+    // motion‐blur pixel‐velocity VJP
     // reconstruct focal‐lengths from Ks
     float2 focal_lengths = make_float2(fx, fy);
 
@@ -624,15 +631,21 @@ __global__ void projection_ewa_3dgs_packed_bwd_kernel(
     // accumulate into the camera‐space mean gradient
     // compute_and_sum_pix_velocity_vjp(
     //    p_view, lin_vel, ang_vel, focal, v_pix, &v_mean_c)
+    float3 p_view = make_float3(mean_c.x, mean_c.y, mean_c.z);
     compute_and_sum_pix_velocity_vjp(
-        mean_c,
+        p_view,
         lin_vel,
         ang_vel,
         focal_lengths,
         v_pix,
-        v_mean_c     // this vector already holds dL/d(mean_c)
+        // v_mean_c     // this vector already holds dL/d(mean_c)
+        v_mean_c_fb
     );
     // now v_mean_c.x/y/z have the extra contributions from d_pix_vel
+    v_mean_c.x += v_mean_c_fb.x;
+    v_mean_c.y += v_mean_c_fb.y;
+    v_mean_c.z += v_mean_c_fb.z;
+
 
     // vjp: transform Gaussian covariance to camera space
     vec3 v_mean(0.f);
@@ -832,8 +845,8 @@ void launch_projection_ewa_3dgs_packed_bwd_kernel(
                     image_height,
                     eps2d,
                     camera_model,
-                    lin,
-                    ang,
+                    lin_vel,
+                    ang_vel,
                     rolling_shutter_time,
                     exposure_time,
                     camera_ids.data_ptr<int64_t>(),

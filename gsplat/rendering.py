@@ -226,6 +226,10 @@ def rasterization(
         'flatten_ids', 'isect_offsets', 'width', 'height', 'tile_size'])
 
     """
+    if linear_velocity is None:
+        linear_velocity = torch.zeros(3)
+    if angular_velocity is None:
+        angular_velocity = torch.zeros(3)
     meta = {}
 
     N = means.shape[0]
@@ -571,6 +575,7 @@ def rasterization(
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
     else:
+
         render_colors, render_alphas = rasterize_to_pixels(
             means2d,
             conics,

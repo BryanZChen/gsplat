@@ -2,6 +2,9 @@
 
 #include <cstdint>
 
+#include <cuda_runtime.h>
+
+
 namespace at {
 class Tensor;
 }
@@ -56,7 +59,7 @@ void launch_projection_ewa_3dgs_fused_fwd_kernel(
     at::Tensor means2d,                    // [C, N, 2]
     at::Tensor depths,                     // [C, N]
     at::Tensor conics,                     // [C, N, 3]
-    at::optional<at::Tensor> compensations, // [C, N] optional
+    at::optional<at::Tensor> compensations // [C, N] optional
 );
 void launch_projection_ewa_3dgs_fused_bwd_kernel(
     // inputs
@@ -122,7 +125,7 @@ void launch_projection_ewa_3dgs_packed_fwd_kernel(
     at::optional<at::Tensor> depths,       // [nnz]
     at::optional<at::Tensor> conics,       // [nnz, 3]
     at::optional<at::Tensor> compensations, // [nnz] optional
-    at::optional<at::Tensor> pix_vels, // [nnz, 2]
+    at::optional<at::Tensor> pix_vels // [nnz, 2]
 );
 void launch_projection_ewa_3dgs_packed_bwd_kernel(
     // fwd inputs

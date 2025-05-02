@@ -2,6 +2,8 @@
 
 #include "Ops.h"
 
+#include "csrc/Projection.h"
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     py::enum_<gsplat::CameraModelType>(m, "CameraModelType")
@@ -44,7 +46,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "projection_ewa_3dgs_packed_bwd",
         &gsplat::projection_ewa_3dgs_packed_bwd
     );
-
     m.def(
         "rasterize_to_pixels_3dgs_fwd", &gsplat::rasterize_to_pixels_3dgs_fwd
     );

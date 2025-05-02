@@ -10,6 +10,8 @@
 #include "Ops.h"        // a collection of all gsplat operators
 #include "Projection.h" // where the launch function is declared
 
+#include <cuda_runtime.h>
+
 namespace gsplat {
 
 std::tuple<at::Tensor, at::Tensor> projection_ewa_simple_fwd(
@@ -261,6 +263,7 @@ std::tuple<
     at::Tensor,
     at::Tensor,
     at::Tensor,
+    at::Tensor,
     at::Tensor>
 projection_ewa_3dgs_packed_fwd(
     const at::Tensor means,                // [N, 3]
@@ -279,10 +282,17 @@ projection_ewa_3dgs_packed_fwd(
     const bool calc_compensations,
     const CameraModelType camera_model,
     // Added inputs
-    const float3 lin_vel,
-    const float3 ang_vel,
+    // const float3 lin_vel,
+    // const float3 ang_vel,
+    const float lin_vel_x,
+    const float lin_vel_y,
+    const float lin_vel_z,
+    const float ang_vel_x,
+    const float ang_vel_y,
+    const float ang_vel_z,
+
     const float rolling_shutter_time,
-    const float exposure_time,
+    const float exposure_time
 ) {
     DEVICE_GUARD(means);
     CHECK_INPUT(means);
@@ -303,6 +313,9 @@ projection_ewa_3dgs_packed_fwd(
     uint32_t nrows = C;
     uint32_t ncols = N;
     uint32_t blocks_per_row = (ncols + N_THREADS_PACKED - 1) / N_THREADS_PACKED;
+
+    float3 lin_vel = make_float3(lin_vel_x, lin_vel_y, lin_vel_z);
+    float3 ang_vel = make_float3(ang_vel_x, ang_vel_y, ang_vel_z);
 
     // first pass
     int32_t nnz;
@@ -343,7 +356,7 @@ projection_ewa_3dgs_packed_fwd(
             // pass in as an indicator on whether compensation will be applied or not.
             calc_compensations ? at::optional<at::Tensor>(at::empty({1}, opt))
                                : c10::nullopt,
-            c10::nullopt, // pix_vels
+            c10::nullopt // pix_vels
         );
         block_accum = at::cumsum(block_cnts, 0, at::kInt);
         nnz = block_accum[-1].item<int32_t>();
@@ -386,6 +399,13 @@ projection_ewa_3dgs_packed_fwd(
             camera_model,
             lin_vel,
             ang_vel,
+            // lin_vel_x,
+            // lin_vel_y,
+            // lin_vel_z,
+            // ang_vel_x,
+            // ang_vel_y,
+            // ang_vel_z,
+
             rolling_shutter_time,
             exposure_time,
             // outputs
@@ -399,8 +419,7 @@ projection_ewa_3dgs_packed_fwd(
             conics,
             calc_compensations ? at::optional<at::Tensor>(compensations)
                                : c10::nullopt,
-            pix_vels,
-                               
+            pix_vels           
         );
     } else {
         indptr.fill_(0);
@@ -415,7 +434,7 @@ projection_ewa_3dgs_packed_fwd(
         depths,
         conics,
         compensations,
-        pix_vels,
+        pix_vels
     );
 }
 
@@ -432,8 +451,15 @@ projection_ewa_3dgs_packed_bwd(
     const uint32_t image_height,
     const float eps2d,
     const CameraModelType camera_model,
-    const float3 lin_vel,
-    const float3 ang_vel,
+    // const float3 lin_vel,
+    // const float3 ang_vel,
+    const float lin_vel_x,
+    const float lin_vel_y,
+    const float lin_vel_z,
+    const float ang_vel_x,
+    const float ang_vel_y,
+    const float ang_vel_z,
+
     const float rolling_shutter_time,
     const float exposure_time,
     // fwd outputs
@@ -505,6 +531,9 @@ projection_ewa_3dgs_packed_bwd(
         }
     }
 
+    float3 lin_vel = make_float3(lin_vel_x, lin_vel_y, lin_vel_z);
+    float3 ang_vel = make_float3(ang_vel_x, ang_vel_y, ang_vel_z);
+
     launch_projection_ewa_3dgs_packed_bwd_kernel(
         // fwd inputs
         means,
@@ -519,6 +548,12 @@ projection_ewa_3dgs_packed_bwd(
         camera_model,
         lin_vel,
         ang_vel,
+        // lin_vel_x,
+        // lin_vel_y,
+        // lin_vel_z,
+        // ang_vel_x,
+        // ang_vel_y,
+        // ang_vel_z,
         rolling_shutter_time,
         exposure_time,
         // fwd outputs
