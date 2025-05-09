@@ -600,7 +600,7 @@ def rasterization(
             dim=-1,
         )
 
-    return render_colors, render_alphas, meta, pix_vels
+    return render_colors, render_alphas, meta
 
 
 def _rasterization(
